@@ -11,7 +11,7 @@
 
 
 #define MAX_THREADS 200
-constexpr size_t CACHELINE_SIZE = 64;
+//constexpr size_t CACHELINE_SIZE = 64;
 using namespace std;
 struct timespec start_time, end_time;
 string lock_type;
@@ -21,10 +21,17 @@ int NUM_ITERATIONS;
 pthread_barrier_t *mybarrier;
 pthread_mutex_t locker;
 int cntr=0;
+atomic<int> cnt = {0};
 //constexpr size_t CACHELINE_SIZE = 64;
 void lock_select(string lock_type);
-/*------------------------------
- *------------------------------*/
+/*------------------------------------------------------
+ *@Class : TasSpinLock
+ *@Function : This implements the test and set lock which
+			  is an atomic lock which implements FIFO and
+			  has cache miss rate. The class has two void
+			  functions Enter and Leave which is lock and
+			  unlock respectively.
+ *------------------------------------------------------*/
 
 class TasSpinLock
 {
@@ -46,6 +53,13 @@ private:
 };
 static_assert(sizeof(TasSpinLock) == CACHELINE_SIZE, "");
 
+/*-------------------------------------------------------------------
+ *@Class : TTasSpinLock
+ *@Function : This implements the testand test and set lock which is 
+			  an atomic lock which implements LIFO and has low cache 
+			  miss rate. The class has two void functions Enter and 
+			  Leave which is lock and unlock respectively.
+ *-------------------------------------------------------------------*/
 class TTasSpinLock
 {
 public:
@@ -68,32 +82,45 @@ private:
     std::atomic_bool Locked = {false};
 };
 static_assert(sizeof(TasSpinLock) == CACHELINE_SIZE, "");
+
+/*-------------------------------------------------------------------
+ *@Class : TicketSpinLock
+ *@Function : This implements the ticket lock which is an atomic lock 
+			  which implements FIFO and has high cache miss rate. The 
+			  class has two void functions Enter and Leave which is 
+			  lock and unlock respectively.
+ *-------------------------------------------------------------------*/
 class TicketSpinLock
 {
 public:
 	
     inline void Enter()
     {
-        const auto myTicketNo = NextTicketNo.fetch_add(1, std::memory_order_relaxed);
+        const auto Ticket_value = Next_TicketNo.fetch_add(1, std::memory_order_relaxed);
  
-        while (ServingTicketNo.load(std::memory_order_acquire) != myTicketNo)
+        while (Serving_TicketNo.load(std::memory_order_acquire) != Ticket_value)
             asm("pause");
     }
  
     inline void Leave()
     {
-        // We can get around a more expensive read-modify-write operation
-        // (std::atomic_size_t::fetch_add()), because no one can modify
-        // ServingTicketNo while we're in the critical section.
-        const auto newNo = ServingTicketNo.load(std::memory_order_relaxed)+1;
-        ServingTicketNo.store(newNo, std::memory_order_release);
+        const auto New_Number = Serving_TicketNo.load(std::memory_order_relaxed)+1;
+        Serving_TicketNo.store(New_Number, std::memory_order_release);
     }
  
 private:
-    std::atomic_size_t ServingTicketNo = {0};
-    std::atomic_size_t NextTicketNo = {0};
+    std::atomic_size_t Serving_TicketNo = {0};
+    std::atomic_size_t Next_TicketNo = {0};
 };
 static_assert(sizeof(TasSpinLock) == CACHELINE_SIZE, "");
+
+/*--------------------------------------------
+ *@Class : MutexLock
+ *@Function :  This class is a classic mutex
+			   lock and uses the inbuilt mutex
+			   functions lock and unlock.
+ *--------------------------------------------*/
+
 class MutexLock
 {
 public:
@@ -108,9 +135,17 @@ public:
 		}
 	
 };
+
+/*----------------------------------------------------
+ *@Class : Barrier 
+ *@Function : This implements sense reversal barrier
+			  which waits for other threads and to be
+			  completed and reverts back and forth
+			  between true or false for the sense.
+ *----------------------------------------------------*/
 class Barrier
 {
-	int cnt = 0;
+	//int cnt = 0;
 	atomic<int> sense={0};
 	int N = NUM_THREADS;
 	MutexLock locker;	
@@ -140,54 +175,52 @@ class Barrier
 			locker.Leave();
 			while(sense.load()!=my_sense)
 			{
-				exit(0);
-			}
-			}
-	}
-};
-namespace sync{
-	
-	inline void mcs_lock::Enter(Node* myNode) 
-	{
-		
-		
-		myNode->next.store(nullptr , memory_order_relaxed);
-		myNode->wait.store(true);
-		Node* oldTail = tail.exchange(myNode);
-		
-		if(oldTail != NULL )
-		{
-			myNode->wait.store(true,memory_order_relaxed);
-			oldTail->next.store(myNode);
-			while(myNode->wait.load())
-			{
-				asm("pause");
+				my_sense=!(my_sense);
 			}
 		}
 	}
-	inline void mcs_lock::Leave(Node* myNode) 
-	{
-		/*if(tail.exchange(&myNode ,nullptr))
-		{}
-		else
-		{
-			while(myNode->next.load() == NULL)
-			{
-				myNode->wait.store(false,memory_order_relaxed);
-			}
-		}*/
-		if (myNode->next.load() == nullptr)
-		{
-			Node *new_tail = myNode;
-			if (tail.compare_exchange_strong(new_tail, nullptr))
-            return;
+};
 
-			while (myNode->next.load() == nullptr)
-                 asm("pause");
+/*-------------------------------------------------
+ *@Class : mcs_lock
+ *@Function : This implements the mcs lock which 
+			  uses atomic nodes as well as boolean
+			  functions where the lock is acquired
+			  when the node value is true and then
+			  unlocked when the value changes from 
+			  true to false.
+ *-------------------------------------------------*/
+namespace sync {
+
+    void mcs_lock::Enter() 
+	{
+        auto previous_node = tail.exchange(&local_node,std::memory_order_acquire);
+        if(previous_node != nullptr) 
+		{
+            local_node.locked = true;
+            previous_node->next = &local_node;
+            while(local_node.locked)
+                asm("pause");
+        }
     }
 
-		myNode->next.load()->wait = false;
-	}
+    void mcs_lock::Leave() 
+	{
+        if(local_node.next == nullptr) 
+		{
+			mcs_node* p = &local_node;
+            if(tail.compare_exchange_strong(p,nullptr,std::memory_order_release,std::memory_order_relaxed)) 
+			{
+                return;
+            }
+			while (local_node.next == nullptr) {};
+        }
+        local_node.next->locked = false;
+        local_node.next = nullptr;
+    }
+
+    thread_local mcs_lock::mcs_node mcs_lock::local_node = mcs_lock::mcs_node{};
+
 }
 /*-------------------------
  *-------------------------*/
@@ -205,7 +238,7 @@ void *thread_main(void *args)
 			lock.Enter();
 			for(int i = 0; i<NUM_ITERATIONS; i++)
 			{
-				if(i%NUM_THREADS==my_tid)
+				//if(i%NUM_THREADS==my_tid)
 					cntr++;
 			}
 			lock.Leave();
@@ -246,18 +279,16 @@ void *thread_main(void *args)
 		{
 			
 			sync::mcs_lock lock;
-			sync::Node* myNode;
 			if(my_tid==0)
 				clock_gettime(CLOCK_MONOTONIC,&start_time);
 			
-			lock.Enter(myNode);
-			
+			lock.Enter();
 			for(int i = 0; i<NUM_ITERATIONS; i++)
 			{
 				if(i%NUM_THREADS==my_tid)
 					cntr++;
 			}
-			lock.Leave(myNode);
+			lock.Leave();
 			if(my_tid==0)
 				clock_gettime(CLOCK_MONOTONIC,&end_time);
 		}
@@ -287,9 +318,9 @@ void *thread_main(void *args)
 		{
 			if(i%NUM_THREADS==my_tid)
 				cntr++;
-		bar.wait();
 		clock_gettime(CLOCK_MONOTONIC,&end_time);
 		}
+		bar.wait();
 	}
 	else
 		cout << "Undefined lock" <<endl;

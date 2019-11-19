@@ -43,7 +43,7 @@ int Bucket_Number(int value);
 struct Bucket_Nodes **buckets;
 pthread_mutex_t locker;
 atomic<bool> flag = {false};
-constexpr size_t CACHELINE_SIZE = 64;
+//constexpr size_t CACHELINE_SIZE = 64;
 /*------------------------------------------------------
  *@Class : TasSpinLock
  *@Function : This implements the test and set lock which
@@ -191,9 +191,9 @@ class Barrier
 			locker.Leave();
 			while(sense.load()!=my_sense)
 			{
-				exit(0);
+				my_sense=!(my_sense);
 			}
-			}
+		}
 	}
 };
 
@@ -206,41 +206,38 @@ class Barrier
 			  unlocked when the value changes from 
 			  true to false.
  *-------------------------------------------------*/
-namespace sync{
-	
-	inline void mcs_lock::Enter(Node* myNode) 
-	{
-		
-		
-		myNode->next.store(nullptr , memory_order_relaxed);
-		myNode->wait.store(true);
-		Node* oldTail = tail.exchange(myNode);
-		
-		if(oldTail != NULL )
-		{
-			myNode->wait.store(true,memory_order_relaxed);
-			oldTail->next.store(myNode);
-			while(myNode->wait.load())
-			{
-				asm("pause");
-			}
-		}
-	}
-	inline void mcs_lock::Leave(Node* myNode) 
-	{
-		
-		if (myNode->next.load() == nullptr)
-		{
-			Node *new_tail = myNode;
-			if (tail.compare_exchange_strong(new_tail, nullptr))
-            return;
+namespace sync {
 
-			while (myNode->next.load() == nullptr)
-                 asm("pause");
+    void mcs_lock::Enter() 
+	{
+        auto previous_node = tail.exchange(&local_node,std::memory_order_acquire);
+        if(previous_node != nullptr) 
+		{
+            local_node.locked = true;
+            previous_node->next = &local_node;
+            while(local_node.locked)
+                asm("pause");
+        }
     }
 
-		myNode->next.load()->wait = false;
-	}
+    void mcs_lock::Leave() 
+	{
+        if(local_node.next == nullptr) 
+		{
+			mcs_node* p = &local_node;
+            if(tail.compare_exchange_strong(p,nullptr,std::memory_order_release,std::memory_order_relaxed)) 
+			{
+                return;
+            }
+        
+            while (local_node.next == nullptr) {};
+        }
+        local_node.next->locked = false;
+        local_node.next = nullptr;
+    }
+
+    thread_local mcs_lock::mcs_node mcs_lock::local_node = mcs_lock::mcs_node{};
+
 }
 /*-------------------------
  *-------------------------*/
@@ -377,6 +374,7 @@ int Bucket_Number(int value)
 void *buck_sort(void *args)
 {
 	int position;
+	
 	if(barrier_type=="--bar=pthread")
 	{
 		if(lock_select=="--lock=tas")
@@ -415,13 +413,13 @@ void *buck_sort(void *args)
 		else if(lock_select=="--lock=mcs")
 		{
 			sync::mcs_lock lock_1;
-			sync::Node *myNode;
+			//sync::Node *myNode;
 			clock_gettime(CLOCK_REALTIME,&start_time);
-			lock_1.Enter(myNode);
+			lock_1.Enter();
 			struct bucket_pos *bucket_pos=args;
 			position=bucket_pos->position;
 			buckets[position] = Bucket_InsertSort(buckets[position]);
-			lock_1.Leave(myNode);
+			lock_1.Leave();
 			clock_gettime(CLOCK_REALTIME,&end_time);
 		}
 		else if(lock_select=="--lock=pthread")
@@ -476,13 +474,14 @@ int main(int argc, char *argv[])
 	string arg_6=argv[6];
 	string arg_7=argv[7];
 	lock_select=argv[9];
+	barrier_type=argv[8];
 	int i,j;
 	if(argc ==2 && arg_1 == "--name")
 	{
 		cout << "Vignesh Iyer\n" <<endl;
 		return 1;
 	}
-	else if(argc < 8 && argc < 2)
+	else if(argc < 10 && argc > 2)
 	{
 		if(arg_1 == "--name")
 		{
@@ -496,14 +495,12 @@ int main(int argc, char *argv[])
 			return 1;
 		}
 	}
-	else if(argc==9)
+	else if(argc==10)
 	{
 		if(arg_1 == "--name")
 		{
 			cout << "Vignesh Iyer\n" <<endl;
-			return 1;
 		}
-		
 		/*----------------------------------
 		 *This function is of type ifstream
 		 *where the input is argv[1]
@@ -538,7 +535,7 @@ int main(int argc, char *argv[])
 		 *the number of threads.
 		 *--------------------------------------*/
 			 
-		sscanf(argv[5],"%d",&NUM_THREADS);
+		sscanf(argv[6],"%d",&NUM_THREADS);
 		pthread_t threads[NUM_THREADS];
 		
 		/*-----------------------------------------
@@ -616,7 +613,7 @@ int main(int argc, char *argv[])
 			}
 			
 			free(bucket_pos);
-			free(buckets);
+			//free(buckets);
 			
 			/*Calulcation of thread execution time*/
 			unsigned long long elapsed_ns;

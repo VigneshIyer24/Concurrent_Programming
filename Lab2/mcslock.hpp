@@ -1,3 +1,5 @@
+
+
 #ifndef MCS_LOCK_H
 #define MCS_LOCK_H
 
@@ -7,27 +9,39 @@
 #include <thread>
 
 #include <iostream>
+constexpr size_t CACHELINE_SIZE = 64;
 using namespace std;
 
-namespace sync
-{
-	class Node
-	{
-		public:
-		atomic<Node*> next={nullptr};
-		atomic<bool> wait={false};
-	};
-	class mcs_lock 
-	{
-		private:
-		atomic<Node*> tail = {NULL};
-	
-		public:
-	
-		inline void Enter(Node*);
-	
-		inline void Leave(Node*);
-	};
+namespace sync {
+  
+    class mcs_lock {
+
+        struct mcs_node {
+
+            bool locked{true};
+            uint8_t variable1[CACHELINE_SIZE - sizeof(bool)];
+
+            mcs_node* next{nullptr};
+            uint8_t variable2[CACHELINE_SIZE - sizeof(mcs_node*)];
+
+        };
+
+        static_assert(sizeof(mcs_node) == 2 * CACHELINE_SIZE, "");
+
+    public:
+
+        void Enter();
+
+        void Leave();
+
+    private:
+
+        std::atomic<mcs_node*> tail{nullptr};
+        static thread_local mcs_node local_node;
+
+    };
+
 }
+
 
 #endif // MCS_LOCK_H
